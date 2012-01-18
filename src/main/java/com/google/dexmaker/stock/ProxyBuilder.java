@@ -42,6 +42,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
 
 /**
  * Creates dynamic proxies of concrete classes.
@@ -126,12 +127,12 @@ public final class ProxyBuilder<T> {
             = Collections.synchronizedMap(new HashMap<Class<?>, Class<?>>());
 
     private final Class<T> baseClass;
-    // TODO: make DexMaker do the defaulting here
     private ClassLoader parentClassLoader = ProxyBuilder.class.getClassLoader();
     private InvocationHandler handler;
     private File dexCache;
     private Class<?>[] constructorArgTypes = new Class[0];
     private Object[] constructorArgValues = new Object[0];
+    private Set<Class<?>> interfaces = new HashSet<Class<?>>();
 
     private ProxyBuilder(Class<T> clazz) {
         baseClass = clazz;
@@ -156,8 +157,23 @@ public final class ProxyBuilder<T> {
         return this;
     }
 
+    /**
+     * Sets the directory where executable code is stored. See {@link
+     * DexMaker#generateAndLoad DexMaker.generateAndLoad()} for guidance on
+     * choosing a secure location for the dex cache.
+     */
     public ProxyBuilder<T> dexCache(File dexCache) {
         this.dexCache = dexCache;
+        return this;
+    }
+    
+    public ProxyBuilder<T> implementing(Class<?>... interfaces) {
+        for (Class<?> i : interfaces) {
+            if (!i.isInterface()) {
+                throw new IllegalArgumentException("Not an interface: " + i.getName());
+            }
+            this.interfaces.add(i);
+        }
         return this;
     }
 
@@ -186,13 +202,13 @@ public final class ProxyBuilder<T> {
         check(handler != null, "handler == null");
         check(constructorArgTypes.length == constructorArgValues.length,
                 "constructorArgValues.length != constructorArgTypes.length");
-        Class<? extends T> proxyClass = getProxyClass();
+        Class<? extends T> proxyClass = buildProxyClass();
         Constructor<? extends T> constructor;
         try {
             constructor = proxyClass.getConstructor(constructorArgTypes);
         } catch (NoSuchMethodException e) {
-            // Thrown when the constructor to be called does not exist.
-            throw new IllegalArgumentException("could not find matching constructor", e);
+            throw new IllegalArgumentException("No constructor for " + baseClass.getName()
+                    + " with parameter types " + Arrays.toString(constructorArgTypes));
         }
         T result;
         try {
@@ -211,11 +227,15 @@ public final class ProxyBuilder<T> {
         return result;
     }
 
-    private Class<? extends T> getProxyClass() throws IOException {
+    // TODO: test coverage for this
+    // TODO: documentation for this
+    public Class<? extends T> buildProxyClass() throws IOException {
         // try the cache to see if we've generated this one before
         @SuppressWarnings("unchecked") // we only populate the map with matching types
         Class<? extends T> proxyClass = (Class) generatedProxyClasses.get(baseClass);
-        if (proxyClass != null && proxyClass.getClassLoader().getParent() == parentClassLoader) {
+        if (proxyClass != null
+                && proxyClass.getClassLoader().getParent() == parentClassLoader
+                && interfaces.equals(asSet(proxyClass.getInterfaces()))) {
             return proxyClass; // cache hit!
         }
 
@@ -225,15 +245,17 @@ public final class ProxyBuilder<T> {
         TypeId<? extends T> generatedType = TypeId.get("L" + generatedName + ";");
         TypeId<T> superType = TypeId.get(baseClass);
         generateConstructorsAndFields(dexMaker, generatedType, superType, baseClass);
-        Method[] methodsToProxy = getMethodsToProxy(baseClass);
+        Method[] methodsToProxy = getMethodsToProxyRecursive();
         generateCodeForAllMethods(dexMaker, generatedType, methodsToProxy, superType);
-        dexMaker.declare(generatedType, generatedName + ".generated", PUBLIC, superType);
+        dexMaker.declare(generatedType, generatedName + ".generated", PUBLIC, superType,
+                getInterfacesAsTypeIds());
         ClassLoader classLoader = dexMaker.generateAndLoad(parentClassLoader, dexCache);
         try {
             proxyClass = loadClass(classLoader, generatedName);
         } catch (IllegalAccessError e) {
             // Thrown when the base class is not accessible.
-            throw new UnsupportedOperationException("cannot proxy inaccessible classes", e);
+            throw new UnsupportedOperationException(
+                    "cannot proxy inaccessible class " + baseClass, e);
         } catch (ClassNotFoundException e) {
             // Should not be thrown, we're sure to have generated this class.
             throw new AssertionError(e);
@@ -307,6 +329,21 @@ public final class ProxyBuilder<T> {
         } catch (IllegalAccessException e) {
             // Should not be thrown, we just set the field to accessible.
             throw new AssertionError(e);
+        }
+    }
+
+    // TODO: test coverage for isProxyClass
+    
+    /**
+     * Returns true if {@code c} is a proxy class created by this builder.
+     */
+    public static boolean isProxyClass(Class<?> c) {
+        // TODO: use a marker interface instead?
+        try {
+            c.getDeclaredField(FIELD_NAME_HANDLER);
+            return true;
+        } catch (NoSuchFieldException e) {
+            return false;
         }
     }
 
@@ -441,14 +478,14 @@ public final class ProxyBuilder<T> {
             /*
              * And to allow calling the original super method, the following is also generated:
              *
-             *     public int super_doSomething(Bar param0, int param1) {
+             *     public String super$doSomething$java_lang_String(Bar param0, int param1) {
              *          int result = super.doSomething(param0, param1);
              *          return result;
              *     }
              */
-            String superName = "super_" + name;
+            // TODO: don't include a super_ method if the target is abstract!
             MethodId<G, ?> callsSuperMethod = generatedType.getMethod(
-                    resultType, superName, argTypes);
+                    resultType, superMethodName(method), argTypes);
             Code superCode = dexMaker.declare(callsSuperMethod, PUBLIC);
             Local<G> superThis = superCode.getThis(generatedType);
             Local<?>[] superArgs = new Local<?>[argClasses.length];
@@ -481,12 +518,24 @@ public final class ProxyBuilder<T> {
         return temp;
     }
 
-    public static Object callSuper(Object proxy, Method method, Object... args)
-            throws SecurityException, IllegalAccessException,
-            InvocationTargetException, NoSuchMethodException {
-        return proxy.getClass()
-                .getMethod("super_" + method.getName(), method.getParameterTypes())
-                .invoke(proxy, args);
+    public static Object callSuper(Object proxy, Method method, Object... args) throws Throwable {
+        try {
+            return proxy.getClass()
+                    .getMethod(superMethodName(method), method.getParameterTypes())
+                    .invoke(proxy, args);
+        } catch (InvocationTargetException e) {
+            throw e.getCause();
+        }
+    }
+
+    /**
+     * The super method must include the return type, otherwise its ambiguous
+     * for methods with covariant return types.
+     */
+    private static String superMethodName(Method method) {
+        String returnType = method.getReturnType().getName();
+        return "super$" + method.getName() + "$"
+                + returnType.replace('.', '_').replace('[', '_').replace(';', '_');
     }
 
     private static void check(boolean condition, String message) {
@@ -531,34 +580,56 @@ public final class ProxyBuilder<T> {
         return (Constructor<T>[]) clazz.getDeclaredConstructors();
     }
 
-    /**
-     * Gets all {@link Method} objects we can proxy in the hierarchy of the supplied class.
-     */
-    private static <T> Method[] getMethodsToProxy(Class<T> clazz) {
-        Set<MethodSetEntry> methodsToProxy = new HashSet<MethodSetEntry>();
-        for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
-            for (Method method : current.getDeclaredMethods()) {
-                if ((method.getModifiers() & Modifier.FINAL) != 0) {
-                    // Skip final methods, we can't override them.
-                    continue;
-                }
-                if ((method.getModifiers() & STATIC) != 0) {
-                    // Skip static methods, overriding them has no effect.
-                    continue;
-                }
-                if (method.getName().equals("finalize") && method.getParameterTypes().length == 0) {
-                    // Skip finalize method, it's likely important that it execute as normal.
-                    continue;
-                }
-                methodsToProxy.add(new MethodSetEntry(method));
-            }
+    private TypeId<?>[] getInterfacesAsTypeIds() {
+        TypeId<?>[] result = new TypeId<?>[interfaces.size()];
+        int i = 0;
+        for (Class<?> implemented : interfaces) {
+            result[i++] = TypeId.get(implemented);
         }
+        return result;
+    }
+
+    /**
+     * Gets all {@link Method} objects we can proxy in the hierarchy of the
+     * supplied class.
+     */
+    private Method[] getMethodsToProxyRecursive() {
+        Set<MethodSetEntry> methodsToProxy = new HashSet<MethodSetEntry>();
+        for (Class<?> c = baseClass; c != null; c = c.getSuperclass()) {
+            getMethodsToProxy(methodsToProxy, c);
+        }
+        for (Class<?> c : interfaces) {
+            getMethodsToProxy(methodsToProxy, c);
+        }
+
         Method[] results = new Method[methodsToProxy.size()];
         int i = 0;
         for (MethodSetEntry entry : methodsToProxy) {
             results[i++] = entry.originalMethod;
         }
         return results;
+    }
+
+    private void getMethodsToProxy(Set<MethodSetEntry> sink, Class<?> c) {
+        for (Method method : c.getDeclaredMethods()) {
+            if ((method.getModifiers() & Modifier.FINAL) != 0) {
+                // Skip final methods, we can't override them.
+                continue;
+            }
+            if ((method.getModifiers() & STATIC) != 0) {
+                // Skip static methods, overriding them has no effect.
+                continue;
+            }
+            if (method.getName().equals("finalize") && method.getParameterTypes().length == 0) {
+                // Skip finalize method, it's likely important that it execute as normal.
+                continue;
+            }
+            sink.add(new MethodSetEntry(method));
+        }
+        
+        for (Class<?> i : c.getInterfaces()) {
+            getMethodsToProxy(sink, i);
+        }
     }
 
     private static <T> String getMethodNameForProxyOf(Class<T> clazz) {
@@ -594,6 +665,10 @@ public final class ProxyBuilder<T> {
             code.cast(localOfMethodReturnType, localForResultOfInvoke);
             code.returnValue(localOfMethodReturnType);
         }
+    }
+
+    private static <T> Set<T> asSet(T... array) {
+        return new CopyOnWriteArraySet<T>(Arrays.asList(array));
     }
 
     private static MethodId<?, ?> getUnboxMethodForPrimitive(Class<?> methodReturnType) {
