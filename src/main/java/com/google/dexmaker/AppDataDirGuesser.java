@@ -17,6 +17,7 @@
 package com.google.dexmaker;
 
 import java.io.File;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -31,7 +32,7 @@ class AppDataDirGuesser {
             Class<?> clazz = Class.forName("dalvik.system.PathClassLoader");
             clazz.cast(classLoader);
             // Use the toString() method to calculate the data directory.
-            String pathFromThisClassLoader = getPathFromThisClassLoader(classLoader);
+            String pathFromThisClassLoader = getPathFromThisClassLoader(classLoader, clazz);
             File[] results = guessPath(pathFromThisClassLoader);
             if (results.length > 0) {
                 return results[0];
@@ -46,7 +47,19 @@ class AppDataDirGuesser {
         return AppDataDirGuesser.class.getClassLoader();
     }
 
-    private String getPathFromThisClassLoader(ClassLoader classLoader) {
+    private String getPathFromThisClassLoader(ClassLoader classLoader,
+            Class<?> pathClassLoaderClass) {
+        // Prior to ICS, we can simply read the "path" field of the
+        // PathClassLoader.
+        try {
+            Field pathField = pathClassLoaderClass.getDeclaredField("path");
+            pathField.setAccessible(true);
+            return (String) pathField.get(classLoader);
+        } catch (NoSuchFieldException ignored) {
+        } catch (IllegalAccessException ignored) {
+        } catch (ClassCastException ignored) {
+        }
+
         // Parsing toString() method: yuck.  But no other way to get the path.
         // Strip out the bit between angle brackets, that's our path.
         String result = classLoader.toString();
@@ -58,6 +71,12 @@ class AppDataDirGuesser {
 
     File[] guessPath(String input) {
         List<File> results = new ArrayList<File>();
+        // Post JB, the system property is set to the applications private data cache
+        // directory.
+        File tmpDir = new File(System.getProperty("java.io.tmpdir"));
+        if (isWriteableDirectory(tmpDir)) {
+            results.add(tmpDir);
+        }
         for (String potential : input.split(":")) {
             if (!potential.startsWith("/data/app/")) {
                 continue;
@@ -71,12 +90,23 @@ class AppDataDirGuesser {
             if (dash != -1) {
                 end = dash;
             }
-            File file = new File("/data/data/" + potential.substring(start, end) + "/cache");
-            if (isWriteableDirectory(file)) {
-                results.add(file);
+            String packageName = potential.substring(start, end);
+            File dataDir = new File("/data/data/" + packageName);
+            if (isWriteableDirectory(dataDir)) {
+                File cacheDir = new File(dataDir, "cache");
+                // The cache directory might not exist -- create if necessary
+                if (fileOrDirExists(cacheDir) || cacheDir.mkdir()) {
+                    if (isWriteableDirectory(cacheDir)) {
+                        results.add(cacheDir);
+                    }
+                }
             }
         }
         return results.toArray(new File[results.size()]);
+    }
+
+    boolean fileOrDirExists(File file) {
+        return file.exists();
     }
 
     boolean isWriteableDirectory(File file) {
