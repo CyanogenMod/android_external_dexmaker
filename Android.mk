@@ -25,3 +25,12 @@ LOCAL_MODULE := dexmaker
 
 # Build a static jar file.
 include $(BUILD_STATIC_JAVA_LIBRARY)
+
+# Build Dexmaker's MockMaker, a plugin to Mockito
+include $(CLEAR_VARS)
+LOCAL_MODULE := dexmaker-mockmaker
+LOCAL_SDK_VERSION := 14
+LOCAL_SRC_FILES := $(call all-java-files-under, src/mockito/java)
+LOCAL_JAVA_RESOURCE_DIRS := src/mockito/resources
+LOCAL_JAVA_LIBRARIES := dexmaker mockito-api
+include $(BUILD_STATIC_JAVA_LIBRARY)
