@@ -45,9 +45,10 @@ public final class DexmakerMockMaker implements MockMaker, StackTraceCleanerProv
             Class[] classesToMock = new Class[extraInterfaces.length + 1];
             classesToMock[0] = typeToMock;
             System.arraycopy(extraInterfaces, 0, classesToMock, 1, extraInterfaces.length);
+            ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
             @SuppressWarnings("unchecked") // newProxyInstance returns the type of typeToMock
-            T mock = (T) Proxy.newProxyInstance(typeToMock.getClassLoader(),
-                    classesToMock, invocationHandler);
+            T mock = (T) Proxy.newProxyInstance(contextClassLoader, classesToMock,
+                    invocationHandler);
             return mock;
 
         } else {
