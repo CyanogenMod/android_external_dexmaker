@@ -14,5 +14,9 @@ It has a small, close-to-the-metal API. This API mirrors the Dalvik bytecode spe
 It includes a stock code generator for class proxies. If you just want to do AOP or class mocking, you don't need to mess around with bytecodes.
 
 Local Modifications:
-Patch to fix http://b/8108255 (Some mockito-based cannot be initialized due to a classloader issue), while Dexmaker's issue #20 (https://code.google.com/p/dexmaker/issues/detail?id=20) is not fixed. 
+bug-8108255.patch: temporary workaround to ClassLoading issues
+    (see https://code.google.com/p/dexmaker/issues/detail?id=20)
+bug-8297650.patch: temporary workaround for a breakage in object instantiation
+    (see https://code.google.com/p/dexmaker/issues/detail?id=22)
+
 (to apply, run 'patch -p0 < bug-xyz.patch' from a fresh src)
