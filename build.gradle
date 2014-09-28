@@ -22,5 +22,5 @@ jar {
 
 dependencies {
     compile getAndroidPrebuilt('10')
-    compile project(':mockito')
+    compile project(path: ':mockito', configuration: 'target')
 }
